@@ -1,5 +1,4 @@
 from tawrch import Augment
-import numpy
 import torch
 import pytest
 
@@ -96,19 +95,17 @@ class TestColors:
 
     def test_color_inversion_u8(self, bypass_params):
         # make random input
-        input_batch = torch.zeros(5, 23, 45, 3).to(torch.uint8).cuda()
+        input_batch = torch.zeros(5, 23, 45, 3, dtype=torch.uint8).cuda()
 
         # apply color inversion only
         bypass_params["color_inversion"] = True
         output_batch = Augment(**bypass_params)(input_batch, output_type=torch.uint8)
 
         # compare colors
-        input_batch = input_batch.cpu().numpy()
-        output_batch = output_batch.cpu().numpy()
-        comp = numpy.logical_xor(
+        comp = torch.logical_xor(
             input_batch == output_batch, input_batch == 255 - output_batch
         )
-        assert numpy.all(comp)
+        assert comp.all()
 
     def test_color_inversion_f32(self, bypass_params):
         # make random input
@@ -278,7 +275,7 @@ class TestCoordinatesMapping:
 
         # get coordinates of the spot in the augmented images
         coords = torch.matmul(mappings, torch.tensor([x, y, 1], dtype=torch.float32).t())
-        coords = (coords[..., :2] / coords[..., 2:3]).round().to(torch.int32).numpy()
+        coords = (coords[..., :2] / coords[..., 2:3]).round().to(torch.int32)
 
         # make sure it is in the output images
         for group in zip(output_batch, coords):
