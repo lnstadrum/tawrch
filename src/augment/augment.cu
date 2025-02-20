@@ -244,11 +244,11 @@ void augment::compute(cudaStream_t stream,
                       size_t outHeight,
                       size_t batchSize,
                       const Params *params) {
-    ::compute(
-        stream, input, output, inWidth, inHeight, outWidth, outHeight, batchSize, params);
+    ::compute(stream, input, output, inWidth, inHeight, outWidth, outHeight, batchSize, params);
 }
 
-void augment::setColorTransform(Params &params, float hueShiftRad, float saturationFactor, float valueFactor) {
+void augment::setColorTransform(
+    Params &params, float hueShiftRad, float saturationFactor, float valueFactor, const float whiteBalanceScales[2]) {
     // Sampling a rotation and scaling matrix in RGB space:
     //   - rotation around (1,1,1) vector by hueShiftRad radians,
     //   - scaling along (1,1,1) vector by valueFactor and in orthogonal
@@ -270,6 +270,15 @@ void augment::setColorTransform(Params &params, float hueShiftRad, float saturat
     params.color[2][0] = -_2;
     params.color[2][1] = _3;
     params.color[2][2] = (valueFactor * (4 * saturationFactor * c + 2)) / 6;
+
+    // pre-multiply by white balance scales
+    params.color[0][0] *= whiteBalanceScales[0];
+    params.color[1][0] *= whiteBalanceScales[0];
+    params.color[2][0] *= whiteBalanceScales[0];
+
+    params.color[0][2] *= whiteBalanceScales[0];
+    params.color[1][2] *= whiteBalanceScales[0];
+    params.color[2][2] *= whiteBalanceScales[0];
 }
 
 void augment::setGeometricTransform(Params &params, float pan, float tilt, float roll, float scaleX, float scaleY) {

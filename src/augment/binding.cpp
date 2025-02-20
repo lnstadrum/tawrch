@@ -88,6 +88,7 @@ class Kernel : public augment::KernelBase<TorchTempGPUBuffer, c10::cuda::CUDAStr
            float hue,
            float saturation,
            float brightness,
+           float whiteBalance,
            float gammaCorrection,
            bool colorInversion,
            bool flipHorizontally,
@@ -129,9 +130,8 @@ class Kernel : public augment::KernelBase<TorchTempGPUBuffer, c10::cuda::CUDAStr
         settings.hue = hue * pi / 180.0f;
         settings.saturation = saturation;
         settings.brightness = brightness;
+        settings.whiteBalance = whiteBalance;
         settings.colorInversion = colorInversion;
-
-        // get gamma correction range
         settings.gammaCorrection = gammaCorrection;
 
         // set random seed
@@ -281,6 +281,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
                       float,
                       float,
                       float,
+                      float,
                       bool,
                       bool,
                       bool>(),
@@ -297,6 +298,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
              py::arg("hue") = 10.0f,
              py::arg("saturation") = 0.4f,
              py::arg("brightness") = 0.1f,
+             py::arg("white_balance") = 0.5f,
              py::arg("gamma_corr") = 0.2f,
              py::arg("color_inversion") = false,
              py::arg("flip_horizontally") = true,
@@ -347,7 +349,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
                  brightness:         Brightness factor range. For every input image, the
                                      intensity is scaled by a random factor sampled in range
                                      `[1 - brightness, 1 + brightness]`.
-                                     The default value is 0.1
+                                     The default value is 0.1.
+                 white_balance:      White balance scale range in number of stops.
+                                     Random gains are applied to red and blue channels.
+                                     The default value is 0.5.
                  gamma_corr:         Gamma correction factor range. For every input image,
                                      the factor value is randomly sampled in range
                                      `[1 - gamma_corr, 1 + gamma_corr]`.

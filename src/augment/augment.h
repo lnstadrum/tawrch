@@ -23,7 +23,8 @@ typedef struct {
     unsigned int flags;
 } Params;
 
-void setColorTransform(Params &params, float hueShiftRad, float saturationFactor, float valueFactor);
+void setColorTransform(
+    Params &params, float hueShiftRad, float saturationFactor, float valueFactor, const float whiteBalanceScales[2]);
 
 void setGeometricTransform(Params &params, float pan, float tilt, float roll, float scaleX, float scaleY);
 

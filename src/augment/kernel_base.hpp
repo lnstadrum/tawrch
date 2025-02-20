@@ -27,8 +27,9 @@ typedef struct {
     float mixupProb;       //!< Mixup per-image probability
     float mixupAlpha;      //!< Mixup alpha parameter
     float hue;             //!< hue shift range in radians
-    float saturation;      //!< saturation factor range
-    float brightness;      //!< brightness range
+    float saturation;      //!< saturation factor variation range
+    float brightness;      //!< brightness variation range
+    float whiteBalance;    //!< white balance scales variation range (stops)
     float gammaCorrection; //!< gamma correction range
     bool colorInversion;   //!< if `true`, colors in every image are inverted with
                            //!< 50% chance
@@ -143,6 +144,7 @@ template <class TempGPUBuffer, typename... BufferAllocationArgs> class KernelBas
             mixShift(-0.1f, 0.1f), hueShift(-settings.hue, settings.hue),
             saturationFactor(1 - settings.saturation, 1 + settings.saturation),
             brightnessFactor(1 - settings.brightness, 1 + settings.brightness),
+            whiteBalanceScale(-settings.whiteBalance, +settings.whiteBalance),
             gammaCorrFactor(1 - settings.gammaCorrection, 1 + settings.gammaCorrection);
         std::uniform_int_distribution<size_t> flipping(0, 1), mixIdx(1, batchSize - 1);
         std::gamma_distribution<> mixupGamma(settings.mixupAlpha, 1);
@@ -153,7 +155,8 @@ template <class TempGPUBuffer, typename... BufferAllocationArgs> class KernelBas
             img.flags = 0;
 
             // color correction
-            setColorTransform(img, hueShift(rnd), saturationFactor(rnd), brightnessFactor(rnd));
+            const float wbScales[2] = {std::exp2f(whiteBalanceScale(rnd)), std::exp2f(whiteBalanceScale(rnd))};
+            setColorTransform(img, hueShift(rnd), saturationFactor(rnd), brightnessFactor(rnd), wbScales);
             img.gammaCorr = gammaCorrFactor(rnd);
             if (settings.colorInversion)
                 img.flags += FLAG_COLOR_INVERSION * flipping(rnd);

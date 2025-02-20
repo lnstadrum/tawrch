@@ -20,6 +20,7 @@ def bypass_params():
         "mixup": 0,
         "saturation": 0,
         "brightness": 0,
+        "white_balance": 0,
         "hue": 0,
         "gamma_corr": 0,
         "color_inversion": False,
@@ -120,6 +121,21 @@ class TestColors:
         diff2 = 1 - input_batch - output_batch
         assert torch.allclose(diff1 * diff2, torch.zeros_like(diff1))
 
+    def test_white_balance(self, bypass_params):
+        # make random input
+        input_batch = torch.zeros(5, 23, 45, 3, dtype=torch.float32).clamp_min(0.001).cuda()
+
+        # apply color inversion only
+        bypass_params["white_balance"] = 1.0
+        output_batch = Augment(**bypass_params)(input_batch, output_type=torch.float32)
+
+        # infer applied WB scales
+        scales = (output_batch / input_batch).reshape(5, -1, 3).mean(dim=1)
+
+        # check
+        assert torch.allclose(scales[..., 1], torch.tensor(1.0))
+        assert torch.allclose(input_batch / scales.reshape(5, 1, 1, 1, 3), output_batch, atol=2e-3)
+        assert torch.all(scales >= 0.5) and torch.all(scales <= 2.0)
 
 class TestMixup:
     """Tests of labels computation with mixup"""
@@ -157,6 +173,7 @@ class TestMixup:
             hue=0,
             saturation=0,
             brightness=0,
+            white_balance=0,
             gamma_corr=0,
             cutout=0,
             mixup=0.9,
@@ -259,6 +276,7 @@ class TestCoordinatesMapping:
                           brightness=0,
                           hue=0,
                           saturation=0,
+                          white_balance=0,
                           mixup=0,
                           cutout=0,
                           translation=0.1,
