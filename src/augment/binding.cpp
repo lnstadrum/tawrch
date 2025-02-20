@@ -140,15 +140,9 @@ class Kernel : public augment::KernelBase<TorchTempGPUBuffer, c10::cuda::CUDAStr
 
         // check settings
         settings.check();
-
-        // query texture parameters
-        Base::queryTextureParams();
     }
 
-    Kernel() {
-        settings.setBypass();
-        Base::queryTextureParams();
-    }
+    Kernel() { settings.setBypass(); }
 
     std::variant<std::vector<torch::Tensor>, torch::Tensor>
     operator()(const torch::Tensor &input,
@@ -399,7 +393,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
              &Kernel::setRandomSeed,
              py::arg("seed"),
              R"""(Reinitializes state of the internal random generator according to a given seed.
- 
+
              Args:
                  seed (int): the seed value
              )""")
@@ -425,7 +419,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
             py::arg("output_type") = py::none(),
             py::arg("output_mapping") = false,
             R"""(Applies a sequence of random transformations to images in a batch.
- 
+
              Args:
                  x:                  A `Tensor` of `uint8` or `float32` type containing an input
                                      image or batch in channels-last layout (`HWC` or `NHWC`).

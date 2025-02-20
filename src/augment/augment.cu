@@ -10,29 +10,44 @@ template <> __device__ void store<float>(float &out, float val) { out = val; }
 
 template <> __device__ void store<uint8_t>(uint8_t &out, float val) { out = 255 * __saturatef(val); }
 
-template <typename in_t, typename out_t>
-__global__ void paddingKernel(const in_t *in, out_t *out, size_t inWidth, size_t height, size_t outWidth) {
-    unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
+template <typename out_t> struct SurfaceTypeMap;
 
-    if (x >= inWidth || y >= height)
+template <> struct SurfaceTypeMap<uint8_t> { using type = uchar4; };
+
+template <> struct SurfaceTypeMap<float> { using type = float4; };
+
+/**
+ * @brief Loads RGB input tensor into a 2D layered texture.
+ *
+ * @tparam in_t     Input tensor scalar type (uint8_t or float)
+ * @tparam surf_t   Corresponding CUDA surface type (uchar4 or float4)
+ * @param input     Input pointer
+ * @param output    Output 2D layered surface
+ * @param width     Input width in pixels
+ * @param height    Input height in pixels
+ */
+template <typename in_t, typename surf_t = typename SurfaceTypeMap<in_t>::type>
+__global__ void loadInputTensor(const in_t *input, cudaSurfaceObject_t output, size_t width, size_t height) {
+    const unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height)
         return;
 
-    unsigned int i = 3 * ((blockIdx.z * height + y) * inWidth + x);
-    unsigned int o = 4 * ((blockIdx.z * height + y) * outWidth + x);
+    unsigned int i = 3 * ((blockIdx.z * height + y) * width + x);
 
-    out[o + 0] = in[i + 0];
-    out[o + 1] = in[i + 1];
-    out[o + 2] = in[i + 2];
+    const surf_t rgb_{input[i], input[i + 1], input[i + 2], 0};
+
+    surf2DLayeredwrite(rgb_, output, x * sizeof(surf_t), y, blockIdx.z);
 }
 
 template <typename out_t>
-__global__ void processingKernel(cudaTextureObject_t texObj,
-                                 out_t *out,
-                                 const size_t width,
-                                 const size_t height,
-                                 const size_t batchSize,
-                                 const Params *params) {
+__global__ void process(cudaTextureObject_t texObj,
+                        out_t *out,
+                        const size_t width,
+                        const size_t height,
+                        const size_t batchSize,
+                        const Params *params) {
     // get pixel position
     unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
     unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -63,11 +78,8 @@ __global__ void processingKernel(cudaTextureObject_t texObj,
     if (imgParams.flags & FLAG_VERTICAL_FLIP)
         tv = 1.0f - tv;
 
-    // unroll V to the batch
-    float tv_ = (blockIdx.z + __saturatef(tv)) / batchSize;
-
     // sample the input texture
-    float4 sample = tex2D<float4>(texObj, tu, tv_);
+    float4 sample = tex2DLayered<float4>(texObj, tu, tv, blockIdx.z);
 
     // get another sample (Mixup)
     if (blockIdx.z != imgParams.mixImgIdx) {
@@ -76,8 +88,7 @@ __global__ void processingKernel(cudaTextureObject_t texObj,
         if (imgParams.flags & FLAG_MIX_VERTICAL_FLIP)
             tv = 1.0f - tv;
 
-        tv_ = (imgParams.mixImgIdx + __saturatef(tv)) / batchSize;
-        float4 sample2 = tex2D<float4>(texObj, tu, tv_);
+        float4 sample2 = tex2DLayered<float4>(texObj, tu, tv, imgParams.mixImgIdx);
 
         sample.x = (1 - imgParams.mixFactor) * sample.x + imgParams.mixFactor * sample2.x;
         sample.y = (1 - imgParams.mixFactor) * sample.y + imgParams.mixFactor * sample2.y;
@@ -118,70 +129,54 @@ __global__ void processingKernel(cudaTextureObject_t texObj,
     store(out[i + 2], b);
 }
 
-template <typename T>
-void padChannels(
-    cudaStream_t stream, const T *input, T *output, size_t width, size_t height, size_t batchSize, size_t outWidth) {
-    const dim3 threads(32, 32);
-    const dim3 blocks((width + threads.x - 1) / threads.x, (height + threads.y - 1) / threads.y, batchSize);
-
-    paddingKernel<T, T><<<blocks, threads, 0, stream>>>(input, output, width, height, outWidth);
-}
-
-template <>
-void augment::padChannels(cudaStream_t stream,
-                          const uint8_t *input,
-                          uint8_t *output,
-                          size_t width,
-                          size_t height,
-                          size_t batchSize,
-                          size_t outWidth) {
-    ::padChannels<uint8_t>(stream, input, output, width, height, batchSize, outWidth);
-}
-
-template <>
-void augment::padChannels(cudaStream_t stream,
-                          const float *input,
-                          float *output,
-                          size_t width,
-                          size_t height,
-                          size_t batchSize,
-                          size_t outWidth) {
-    ::padChannels<float>(stream, input, output, width, height, batchSize, outWidth);
-}
-
 template <typename in_t, typename out_t>
 void compute(cudaStream_t stream,
              const in_t *input,
              out_t *output,
              size_t inWidth,
              size_t inHeight,
-             size_t pitch,
              size_t outWidth,
              size_t outHeight,
              size_t batchSize,
-             size_t maxTextureHeight,
              const Params *params) {
-    // set up texture
+
+    // allocate temporary cuda array
+    cudaChannelFormatDesc channelDesc;
+    channelDesc.f = std::is_same<in_t, float>::value ? cudaChannelFormatKindFloat : cudaChannelFormatKindUnsigned;
+    channelDesc.w = 8 * sizeof(in_t);
+    channelDesc.x = 8 * sizeof(in_t);
+    channelDesc.y = 8 * sizeof(in_t);
+    channelDesc.z = 8 * sizeof(in_t);
+    cudaArray *buffer;
+    auto error = cudaMalloc3DArray(&buffer,
+                                   &channelDesc,
+                                   make_cudaExtent(inWidth, inHeight, batchSize),
+                                   cudaArrayLayered | cudaArraySurfaceLoadStore);
+    if (error != cudaSuccess)
+        throw std::runtime_error("Cannot allocate 3D array: " + std::string(cudaGetErrorString(error)));
+
+    // prepare the corresponding resource descriptor
     struct cudaResourceDesc resDesc;
     memset(&resDesc, 0, sizeof(resDesc));
-    resDesc.resType = cudaResourceTypePitch2D;
-    resDesc.res.pitch2D.devPtr = const_cast<in_t *>(input);
-    resDesc.res.pitch2D.desc.f =
-        std::is_same<in_t, float>::value ? cudaChannelFormatKindFloat : cudaChannelFormatKindUnsigned;
-    resDesc.res.pitch2D.desc.w = 8 * sizeof(in_t);
-    resDesc.res.pitch2D.desc.x = 8 * sizeof(in_t);
-    resDesc.res.pitch2D.desc.y = 8 * sizeof(in_t);
-    resDesc.res.pitch2D.desc.z = 8 * sizeof(in_t);
-    resDesc.res.pitch2D.width = inWidth;
-    resDesc.res.pitch2D.height = inHeight * batchSize;
-    if (resDesc.res.pitch2D.height > maxTextureHeight)
-        throw std::runtime_error("Cannot fit a batch of " + std::to_string(batchSize) + " images of " +
-                                 std::to_string(inHeight) +
-                                 " pixels height into texture. "
-                                 "Max allowed texture height on this GPU is " +
-                                 std::to_string(maxTextureHeight) + " pixels.");
-    resDesc.res.pitch2D.pitchInBytes = pitch;
+    resDesc.resType = cudaResourceTypeArray;
+    resDesc.res.array.array = buffer;
 
+    // make a surface object for input conversion
+    cudaSurfaceObject_t surfObj;
+    error = cudaCreateSurfaceObject(&surfObj, &resDesc);
+    if (error != cudaSuccess) {
+        cudaFreeArray(buffer);
+        throw std::runtime_error("Cannot create surface object: " + std::string(cudaGetErrorString(error)));
+    }
+
+    // load input tenso to the temporary buffer array
+    {
+        const dim3 threads(16, 16, 1);
+        const dim3 blocks((inWidth + threads.x - 1) / threads.x, (inHeight + threads.y - 1) / threads.y, batchSize);
+        loadInputTensor<in_t><<<blocks, threads, 0, stream>>>(input, surfObj, inWidth, inHeight);
+    }
+
+    // set up input texture
     struct cudaTextureDesc texDesc;
     memset(&texDesc, 0, sizeof(texDesc));
     texDesc.addressMode[0] = cudaAddressModeClamp;
@@ -191,18 +186,21 @@ void compute(cudaStream_t stream,
     texDesc.normalizedCoords = 1;
 
     cudaTextureObject_t texObj = 0;
-    auto error = cudaCreateTextureObject(&texObj, &resDesc, &texDesc, nullptr);
-    if (error != cudaSuccess)
+    error = cudaCreateTextureObject(&texObj, &resDesc, &texDesc, nullptr);
+    if (error != cudaSuccess) {
+        cudaFreeArray(buffer);
         throw std::runtime_error("Cannot create texture object: " + std::string(cudaGetErrorString(error)));
+    }
 
-    // run kernel
-    const dim3 threads(32, 32);
+    // run the main kernel
+    const dim3 threads(16, 16, 1);
     const dim3 blocks((outWidth + threads.x - 1) / threads.x, (outHeight + threads.y - 1) / threads.y, batchSize);
-
-    processingKernel<<<blocks, threads, 0, stream>>>(texObj, output, outWidth, outHeight, batchSize, params);
+    process<<<blocks, threads, 0, stream>>>(texObj, output, outWidth, outHeight, batchSize, params);
 
     // destroy texture
     cudaDestroyTextureObject(texObj);
+    cudaDestroyTextureObject(surfObj);
+    cudaFreeArray(buffer);
 
     // check for errors
     error = cudaGetLastError();
@@ -216,14 +214,11 @@ void augment::compute(cudaStream_t stream,
                       uint8_t *output,
                       size_t inWidth,
                       size_t inHeight,
-                      size_t pitch,
                       size_t outWidth,
                       size_t outHeight,
                       size_t batchSize,
-                      size_t maxTextureHeight,
                       const Params *params) {
-    ::compute(
-        stream, input, output, inWidth, inHeight, pitch, outWidth, outHeight, batchSize, maxTextureHeight, params);
+    ::compute(stream, input, output, inWidth, inHeight, outWidth, outHeight, batchSize, params);
 }
 
 template <>
@@ -232,14 +227,11 @@ void augment::compute(cudaStream_t stream,
                       float *output,
                       size_t inWidth,
                       size_t inHeight,
-                      size_t pitch,
                       size_t outWidth,
                       size_t outHeight,
                       size_t batchSize,
-                      size_t maxTextureHeight,
                       const Params *params) {
-    ::compute(
-        stream, input, output, inWidth, inHeight, pitch, outWidth, outHeight, batchSize, maxTextureHeight, params);
+    ::compute(stream, input, output, inWidth, inHeight, outWidth, outHeight, batchSize, params);
 }
 
 template <>
@@ -248,14 +240,12 @@ void augment::compute(cudaStream_t stream,
                       float *output,
                       size_t inWidth,
                       size_t inHeight,
-                      size_t pitch,
                       size_t outWidth,
                       size_t outHeight,
                       size_t batchSize,
-                      size_t maxTextureHeight,
                       const Params *params) {
     ::compute(
-        stream, input, output, inWidth, inHeight, pitch, outWidth, outHeight, batchSize, maxTextureHeight, params);
+        stream, input, output, inWidth, inHeight, outWidth, outHeight, batchSize, params);
 }
 
 void augment::setColorTransform(Params &params, float hueShiftRad, float saturationFactor, float valueFactor) {

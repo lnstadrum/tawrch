@@ -68,10 +68,6 @@ typedef struct {
  */
 template <class TempGPUBuffer, typename... BufferAllocationArgs> class KernelBase {
   private:
-    size_t textureAlignment, texturePitchAlignment;
-    size_t maxTextureHeight; //!< maximum texture height in pixels allowed by the
-                             //!< GPU
-
     template <typename val_t, typename mod_t> static inline val_t roundUp(val_t value, mod_t modulo) {
         return (value + modulo - 1) / modulo * modulo;
     }
@@ -84,26 +80,6 @@ template <class TempGPUBuffer, typename... BufferAllocationArgs> class KernelBas
     static inline void reportCudaError(cudaError_t status, const std::string &message) {
         if (status != cudaSuccess)
             throw std::runtime_error(message);
-    }
-
-    /**
-     * @brief Queries GPU for texture alignment parameters and texture limits.
-     */
-    void queryTextureParams() {
-        // get current device number
-        int device;
-        reportCudaError(cudaGetDevice(&device), "Cannot get current CUDA device number");
-
-        // query device properties
-        cudaDeviceProp properties;
-        reportCudaError(cudaGetDeviceProperties(&properties, device), "Cannot get CUDA device properties");
-
-        // get alignment values
-        textureAlignment = properties.textureAlignment;
-        texturePitchAlignment = properties.texturePitchAlignment;
-
-        // get max texture height
-        maxTextureHeight = (size_t)properties.maxTexture2D[1];
     }
 
     /**
@@ -148,22 +124,6 @@ template <class TempGPUBuffer, typename... BufferAllocationArgs> class KernelBas
             arScaleX = (float)(outputWidth * inputHeight) / (inputWidth * outputHeight);
         else
             arScaleY = (float)(outputHeight * inputWidth) / (inputHeight * outputWidth);
-
-        // allocate a temporary buffer ensuring starting address and pitch
-        // alignment
-        const int64_t pitchBytes = roundUp(inputWidth * 4 * sizeof(in_t), texturePitchAlignment);
-        const size_t bufferSizeBytes = textureAlignment + batchSize * groups * inputHeight * pitchBytes;
-        TempGPUBuffer buffer(bufferSizeBytes, allocationArgs...);
-        auto unalignedBufferAddress = buffer();
-
-        // align its address
-        auto bufferPtr =
-            reinterpret_cast<in_t *>(roundUp(reinterpret_cast<size_t>(unalignedBufferAddress), textureAlignment));
-
-        // pad the input to have 4 channels and an aligned pitch
-        padChannels(
-            stream, inputPtr, bufferPtr, inputWidth, inputHeight, batchSize * groups, pitchBytes / (4 * sizeof(in_t)));
-        reportCudaError(cudaGetLastError(), "Cannot pad the input image");
 
         // check if no labels but mixup
         if (inputLabelsPtr == nullptr && settings.mixupProb != 0)
@@ -254,16 +214,14 @@ template <class TempGPUBuffer, typename... BufferAllocationArgs> class KernelBas
         // compute the output
         try {
             compute(stream,
-                    bufferPtr,
+                    inputPtr,
                     outputPtr, // input and output pointers
                     inputWidth,
                     inputHeight,
-                    pitchBytes, // input sizes
                     outputWidth,
                     outputHeight,       // output sizes
                     batchSize * groups, // batch size
-                    maxTextureHeight,
-                    paramsGpuPtr); // transformation description
+                    paramsGpuPtr);      // transformation description
         } catch (std::exception &ex) {
             throw std::runtime_error(ex.what());
         }
